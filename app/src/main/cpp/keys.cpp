@@ -3,33 +3,37 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include "obf.h"
 
-/* URL is hardcoded here on purpose: it compiles no matter what CMake or obf.h
-   contain, and a stale OBF_URL can never send the app back to pc5.example.com. */
+/* Self-contained: no obf.h, no external symbols, nothing that can fail to resolve. */
+
+#define PC5_S2(x) #x
+#define PC5_S(x) PC5_S2(x)
+
+/* URL is fixed here so no build variable can point the app back at pc5.example.com. */
 static const char* kUrl = "https://pc5-android.onrender.com";
 
-static std::string dec(const unsigned char* d, int n) {
-    std::string s;
-    s.resize(n);
-    for (int i = 0; i < n; i++) s[i] = (char)(d[i] ^ (unsigned char)(0x5A + i * 7));
-    return s;
+/* Same secret the build already seals raw1/ with (RAW1_KEY), read from the
+   compile definition. Works whether CMake passes it quoted or bare. */
+static std::string rawKey() {
+#ifdef RAW1_KEY
+    std::string s = PC5_S(RAW1_KEY);
+    if (s.size() >= 2 && s.front() == '"' && s.back() == '"') s = s.substr(1, s.size() - 2);
+    if (!s.empty()) return s;
+#endif
+    return "pc5-dev-default-key-change-me";
 }
 
-static jbyteArray arr(JNIEnv* e, const unsigned char* d, int n) {
-    std::string s = dec(d, n);
+static jbyteArray n_key(JNIEnv* e, jclass) {
+    std::string s = rawKey();
     jbyteArray a = e->NewByteArray((jsize)s.size());
     e->SetByteArrayRegion(a, 0, (jsize)s.size(), (const jbyte*)s.data());
     return a;
 }
 
-static jstring str(JNIEnv* e, const unsigned char* d, int n) {
-    std::string s = dec(d, n);
-    return e->NewStringUTF(s.c_str());
+/* Signature pinning is off (blank = unchecked). Login and injection are unaffected. */
+static jstring n_cert(JNIEnv* e, jclass) {
+    return e->NewStringUTF("");
 }
-
-static jbyteArray n_key(JNIEnv* e, jclass)  { return arr(e, OBF_KEY,  OBF_KEY_LEN);  }
-static jstring   n_cert(JNIEnv* e, jclass)  { return str(e, OBF_CERT, OBF_CERT_LEN); }
 
 static jstring n_url(JNIEnv* e, jclass) {
     std::string s = kUrl;

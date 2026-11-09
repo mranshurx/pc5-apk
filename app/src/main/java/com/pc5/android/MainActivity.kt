@@ -41,8 +41,23 @@ class MainActivity : AppCompatActivity() {
     private var timer: CountDownTimer? = null
     private var pending: Pair<List<File>, Target>? = null
 
+    /* A click that needs Shizuku permission parks here and resumes on grant. */
+    private var awaitingStart = false
+    private var busy = false
+
     private val permListener = Shizuku.OnRequestPermissionResultListener { id, res ->
-        if (id == REQ) log(if (res == 0) "Shizuku granted" else "Shizuku permission denied")
+        if (id != REQ) return@OnRequestPermissionResultListener
+        if (res == 0) {
+            log("Shizuku granted")
+            if (awaitingStart) {
+                awaitingStart = false
+                doStart()
+            }
+        } else {
+            log("Shizuku permission denied")
+            awaitingStart = false
+            startBtn.isEnabled = true
+        }
     }
 
     override fun onCreate(b: Bundle?) {
@@ -85,7 +100,7 @@ class MainActivity : AppCompatActivity() {
     override fun onDestroy() {
         Shizuku.removeRequestPermissionResultListener(permListener)
         timer?.cancel()
-        if (pending != null) lifecycleScope.launch { wipeNow() }
+        if (pending != null) lifecycleScope.launch { runCatching { wipeNow() } }
         super.onDestroy()
     }
 
@@ -170,37 +185,49 @@ class MainActivity : AppCompatActivity() {
 
     /* ---------------- shizuku ---------------- */
 
-    private fun ensureShizuku(onReady: () -> Unit) {
-        if (Injector.shizukuReady()) { onReady(); return }
+    private fun shizukuUsable(): Boolean = try {
+        Injector.shizukuReady() && Shizuku.pingBinder() &&
+            (Shizuku.isPreV11() || Shizuku.checkSelfPermission() == 0)
+    } catch (e: Throwable) { false }
+
+    private fun installed(p: String) = try {
+        packageManager.getPackageInfo(p, 0); true
+    } catch (e: Exception) { false }
+
+    /* Returns true when we can proceed right now; otherwise logs and (maybe) asks. */
+    private fun ensureShizuku(): Boolean {
+        if (shizukuUsable()) return true
         try {
             if (!Shizuku.pingBinder()) {
                 if (installed("moe.shizuku.privileged.api")) {
-                    log("Shizuku is not running — start it")
+                    log("Shizuku is not running — start it, then tap Start again")
                     startActivity(Intent(Intent.ACTION_VIEW).setPackage("moe.shizuku.privileged.api"))
                 } else {
                     log("Shizuku not installed")
                     startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(
                         "https://play.google.com/store/apps/details?id=moe.shizuku.privileged.api")))
                 }
-                return
+                return false
             }
-            if (Shizuku.isPreV11() || Shizuku.checkSelfPermission() == 0) { onReady(); return }
+            if (Shizuku.isPreV11() || Shizuku.checkSelfPermission() == 0) return true
             if (Shizuku.shouldShowRequestPermissionRationale()) {
-                log("Shizuku permission denied permanently — enable it in Shizuku")
-            } else {
-                log("requesting Shizuku permission")
-                Shizuku.requestPermission(REQ)
+                log("Shizuku permission denied permanently — enable it inside Shizuku")
+                return false
             }
-        } catch (e: Throwable) { log("Shizuku error: ${e.message}") }
+            log("requesting Shizuku permission")
+            awaitingStart = true
+            Shizuku.requestPermission(REQ)
+            return false
+        } catch (e: Throwable) {
+            log("Shizuku error: ${e.message}")
+            return false
+        }
     }
-
-    private fun installed(p: String) = try {
-        packageManager.getPackageInfo(p, 0); true
-    } catch (e: Exception) { false }
 
     /* ---------------- inject ---------------- */
 
     private fun start() {
+        if (busy) { log("already running"); return }
         val idx = spinner.selectedItemPosition
         if (idx !in targets.indices) { log("no version selected"); return }
         val target = targets[idx]
@@ -209,15 +236,32 @@ class MainActivity : AppCompatActivity() {
         startBtn.isEnabled = false
         log("preparing")
 
-        ensureShizuku {
-            lifecycleScope.launch {
+        if (!ensureShizuku()) {
+            startBtn.isEnabled = true
+            return
+        }
+        doStart()
+    }
+
+    private fun doStart() {
+        if (busy) return
+        val idx = spinner.selectedItemPosition
+        if (idx !in targets.indices) { startBtn.isEnabled = true; return }
+        val target = targets[idx]
+
+        busy = true
+        lifecycleScope.launch {
+            try {
                 val staged = withContext(Dispatchers.IO) { Payload.stage(this@MainActivity) }
-                if (staged.isEmpty()) { log("payload empty"); startBtn.isEnabled = true; return@launch }
+                if (staged.isEmpty()) {
+                    log("payload empty — staging failed")
+                    return@launch
+                }
+                log("staged ${staged.size} file(s)")
 
                 val push = withContext(Dispatchers.IO) { Injector.push(staged, target) }
                 if (push.first != 0) {
                     log("inject failed: ${push.second.ifBlank { "exit ${push.first}" }}")
-                    startBtn.isEnabled = true
                     return@launch
                 }
                 log("injected ${staged.size} file(s) → ${target.dest}")
@@ -226,7 +270,11 @@ class MainActivity : AppCompatActivity() {
                 pending = staged to target
 
                 for (i in 3 downTo 1) { log("wiping in ${i}s"); delay(1000) }
-                wipeNow()
+                runCatching { wipeNow() }
+            } catch (e: Throwable) {
+                log("error: ${e.javaClass.simpleName}: ${e.message}")
+            } finally {
+                busy = false
                 startBtn.isEnabled = true
             }
         }

@@ -1,6 +1,5 @@
 package com.pc5.android
 
-import rikka.shizuku.Shell
 import rikka.shizuku.Shizuku
 import java.io.File
 
@@ -14,9 +13,29 @@ object Injector {
         }
     }
 
+    private fun newProcess(cmd: Array<String>): Process {
+        val types = arrayOf<Class<*>>(
+            Array<String>::class.java,
+            Array<String>::class.java,
+            String::class.java
+        )
+        for (className in arrayOf("rikka.shizuku.Shizuku", "rikka.shizuku.Shell")) {
+            try {
+                val cls = Class.forName(className)
+                val method = cls.getDeclaredMethod("newProcess", *types)
+                method.isAccessible = true
+                val p = method.invoke(null, cmd, null, null)
+                if (p is Process) return p
+            } catch (e: Throwable) {
+                // fall through to next candidate
+            }
+        }
+        return ProcessBuilder(*cmd).redirectErrorStream(true).start()
+    }
+
     fun sh(cmd: String): Pair<Int, String> {
         return try {
-            val p: Process = Shell.newProcess(arrayOf("sh", "-c", cmd), null, null)
+            val p: Process = newProcess(arrayOf("sh", "-c", cmd))
             val out: String = p.inputStream.bufferedReader().readText() +
                 p.errorStream.bufferedReader().readText()
             val code: Int = p.waitFor()

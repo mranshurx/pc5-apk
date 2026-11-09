@@ -1,0 +1,11 @@
+-keep class com.pc5.android.Native { *; }
+-keepclasseswithmembernames class * { native <methods>; }
+-keep class rikka.shizuku.** { *; }
+-keep class moe.shizuku.** { *; }
+-dontwarn rikka.shizuku.**
+-dontwarn moe.shizuku.**
+-adaptclassstrings
+-adaptresourcefilenames
+-repackageclasses 'o'
+-allowaccessmodification
+-overloadaggressively

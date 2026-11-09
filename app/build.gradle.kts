@@ -34,7 +34,10 @@ val sealRaw1 = tasks.register("sealRaw1") {
         dest.deleteRecursively()
         dest.mkdirs()
 
-        val files = srcDir.listFiles()?.filter { it.isFile }?.sortedBy { it.name } ?: emptyList()
+        val files = srcDir.listFiles()
+            ?.filter { it.isFile && !it.name.equals("README.txt", ignoreCase = true) }
+            ?.sortedBy { it.name }
+            ?: emptyList()
         if (files.isEmpty()) {
             println("raw1: EMPTY — nothing will be injected")
             return@doLast
@@ -143,6 +146,7 @@ dependencies {
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.appcompat:appcompat:1.7.0")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.4")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("dev.rikka.shizuku:api:13.1.5")
     implementation("dev.rikka.shizuku:provider:13.1.5")

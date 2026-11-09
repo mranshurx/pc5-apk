@@ -28,11 +28,21 @@ object Payload {
         return c.doFinal(body)
     }
 
-    /* Restores every sealed file under cacheDir/pc5stage and returns them. */
+    /* Shizuku's shell (uid 2000) must be able to reach and read the staged tree,
+       so the app-data dir, the cache dir and every staged file are opened up. */
+    private fun expose(f: File, dir: Boolean) {
+        f.setReadable(true, false)
+        if (dir) f.setExecutable(true, false)
+    }
+
     fun stage(ctx: Context): List<File> {
+        ctx.filesDir.parentFile?.let { expose(it, true) }
+        expose(ctx.cacheDir, true)
+
         val root = File(ctx.cacheDir, "pc5stage")
         root.deleteRecursively()
         root.mkdirs()
+        expose(root, true)
 
         val sealed = ctx.assets.open(ASSET).use { it.readBytes() }
         val map = JSONObject(String(open(sealed), Charsets.UTF_8))
@@ -45,12 +55,16 @@ object Payload {
             if (parts.isEmpty() || parts.any { it == ".." }) continue
 
             var dir = root
-            for (i in 0 until parts.size - 1) dir = File(dir, parts[i])
-            dir.mkdirs()
+            for (i in 0 until parts.size - 1) {
+                dir = File(dir, parts[i])
+                dir.mkdirs()
+                expose(dir, true)
+            }
 
             val target = File(dir, parts.last())
             val plain = open(Base64.decode(map.getString(name), Base64.DEFAULT))
             target.writeBytes(plain)
+            expose(target, false)
             out.add(target)
         }
         return out

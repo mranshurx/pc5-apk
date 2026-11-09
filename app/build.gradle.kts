@@ -15,6 +15,11 @@ val raw1Key: String = System.getenv("RAW1_KEY") ?: "pc5-dev-default-key-change-m
 val expectedCert: String = System.getenv("EXPECTED_CERT_SHA256") ?: ""
 val ndkVer = "27.0.12077973"
 
+val keystoreFile: File? = System.getenv("KEYSTORE_PATH")
+    ?.takeIf { it.isNotBlank() }
+    ?.let { file(it) }
+    ?.takeIf { it.isFile }
+
 val encOut = layout.buildDirectory.dir("generated/raw1enc")
 
 val sealRaw1 = tasks.register("sealRaw1") {
@@ -97,10 +102,9 @@ android {
     sourceSets["main"].assets.srcDir(encOut)
 
     signingConfigs {
-        create("rel") {
-            val p = System.getenv("KEYSTORE_PATH")
-            if (!p.isNullOrBlank() && file(p).exists()) {
-                storeFile = file(p)
+        keystoreFile?.let { ks ->
+            create("rel") {
+                storeFile = ks
                 storePassword = System.getenv("KEYSTORE_PASSWORD")
                 keyAlias = System.getenv("KEY_ALIAS")
                 keyPassword = System.getenv("KEY_PASSWORD")
@@ -113,7 +117,7 @@ android {
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-            signingConfig = signingConfigs.getByName("rel")
+            if (keystoreFile != null) signingConfig = signingConfigs.getByName("rel")
         }
         debug {
             applicationIdSuffix = ".debug"

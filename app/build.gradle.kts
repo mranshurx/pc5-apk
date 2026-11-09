@@ -9,6 +9,7 @@ plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
 }
+
 val backendUrl: String = (System.getenv("BACKEND_URL") ?: "https://pc5-android.onrender.com").trimEnd('/')
 val raw1Key: String = System.getenv("RAW1_KEY") ?: "pc5-dev-default-key-change-me"
 val expectedCert: String = System.getenv("EXPECTED_CERT_SHA256") ?: ""
@@ -78,6 +79,8 @@ android {
         targetSdk = 34
         versionCode = 1
         versionName = "1.0.0"
+
+        buildConfigField("String", "RAW1_KEY", "\"$raw1Key\"")
 
         externalNativeBuild {
             cmake {

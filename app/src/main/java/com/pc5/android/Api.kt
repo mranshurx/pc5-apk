@@ -21,22 +21,20 @@ object Api {
         return u.trimEnd('/')
     }
 
+    private fun once(url: String): JSONObject? = try {
+        val req = Request.Builder()
+            .url(url)
+            .header("User-Agent", "PC5-ANDROID")
+            .build()
+        http.newCall(req).execute().use { r -> r.body?.string()?.let { JSONObject(it) } }
+    } catch (e: Exception) { null }
+
     fun checkKey(key: String, did: String): JSONObject? {
         val url = "${base()}/api/check-key?key=$key&did=$did"
-        repeat(2) { attempt ->
-            try {
-                val req = Request.Builder()
-                    .url(url)
-                    .header("User-Agent", "PC5-ANDROID")
-                    .build()
-                http.newCall(req).execute().use { r ->
-                    val body = r.body?.string() ?: return null
-                    return JSONObject(body)
-                }
-            } catch (e: Exception) {
-                if (attempt == 1) return null
-                try { Thread.sleep(1500) } catch (i: InterruptedException) { return null }
-            }
+        for (i in 0 until 2) {
+            val j = once(url)
+            if (j != null) return j
+            if (i == 0) try { Thread.sleep(1500) } catch (e: InterruptedException) { }
         }
         return null
     }

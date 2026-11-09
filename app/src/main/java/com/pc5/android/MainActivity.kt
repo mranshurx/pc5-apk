@@ -251,6 +251,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun log(s: String) {
         statusText.append("> $s\n")
-        (statusText.parent as? ScrollView)?.post { it.fullScroll(View.FOCUS_DOWN) }
+        val sv = statusText.parent as? ScrollView ?: return
+        sv.post { sv.fullScroll(View.FOCUS_DOWN) }
     }
 }

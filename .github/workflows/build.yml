@@ -6,9 +6,17 @@ on:
     tags: [ 'v*' ]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
@@ -19,33 +27,51 @@ jobs:
 
       - uses: android-actions/setup-android@v3
 
-      - name: NDK + CMake
-        run: sdkmanager "ndk;27.0.12077973" "cmake;3.22.1" > /dev/null
+      - name: Install SDK packages
+        run: |
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager "platforms;android-34" "build-tools;34.0.0" \
+                     "ndk;27.0.12077973" "cmake;3.22.1"
 
-      - uses: gradle/actions/setup-gradle@v3
+      - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: 8.7
 
       - name: Decode keystore
-        if: ${{ secrets.KEYSTORE_B64 != '' }}
-        run: echo "${{ secrets.KEYSTORE_B64 }}" | base64 -d > "$RUNNER_TEMP/release.jks"
-
-      - name: Build
         env:
-          KEYSTORE_PATH: ${{ runner.temp }}/release.jks
+          KEYSTORE_B64: ${{ secrets.KEYSTORE_B64 }}
+        run: |
+          set -euo pipefail
+          if [ -n "${KEYSTORE_B64}" ]; then
+            printf '%s' "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/release.jks"
+            echo "KEYSTORE_PATH=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
+            echo "Keystore decoded."
+          else
+            echo "No KEYSTORE_B64 secret — release build will be skipped."
+          fi
+
+      - name: Build debug
+        env:
+          BACKEND_URL: ${{ vars.BACKEND_URL }}
+          RAW1_KEY: ${{ secrets.RAW1_KEY }}
+          EXPECTED_CERT_SHA256: ${{ vars.EXPECTED_CERT_SHA256 }}
+        run: gradle --no-daemon --stacktrace assembleDebug
+
+      - name: Build release
+        if: env.KEYSTORE_PATH != ''
+        env:
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
           BACKEND_URL: ${{ vars.BACKEND_URL }}
           RAW1_KEY: ${{ secrets.RAW1_KEY }}
           EXPECTED_CERT_SHA256: ${{ vars.EXPECTED_CERT_SHA256 }}
-        run: |
-          gradle --no-daemon assembleDebug
-          if [ -n "$KEYSTORE_PASSWORD" ]; then gradle --no-daemon assembleRelease; fi
+        run: gradle --no-daemon --stacktrace assembleRelease
 
       - uses: actions/upload-artifact@v4
         with:
           name: pc5-apk
+          if-no-files-found: warn
           path: |
             app/build/outputs/apk/debug/*.apk
             app/build/outputs/apk/release/*.apk

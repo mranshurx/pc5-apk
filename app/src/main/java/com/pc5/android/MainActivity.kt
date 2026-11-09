@@ -41,7 +41,7 @@ class MainActivity : AppCompatActivity() {
     private var timer: CountDownTimer? = null
     private var pending: Pair<List<File>, Target>? = null
 
-    /* A click that needs Shizuku permission parks here and resumes on grant. */
+    /* Set when a Start tap is waiting on the permission dialog. */
     private var awaitingStart = false
     private var busy = false
 
@@ -54,7 +54,7 @@ class MainActivity : AppCompatActivity() {
                 doStart()
             }
         } else {
-            log("Shizuku permission denied")
+            log("Shizuku permission denied — tap Start to ask again")
             awaitingStart = false
             startBtn.isEnabled = true
         }
@@ -95,6 +95,9 @@ class MainActivity : AppCompatActivity() {
 
         val saved = getSharedPreferences("pc5", MODE_PRIVATE).getString("key", null)
         if (saved != null) revalidate(saved) else showUnlock()
+
+        /* Ask up front, on first launch, so Start never has to. */
+        statusText.postDelayed({ askShizukuOnLaunch() }, 600)
     }
 
     override fun onDestroy() {
@@ -194,7 +197,33 @@ class MainActivity : AppCompatActivity() {
         packageManager.getPackageInfo(p, 0); true
     } catch (e: Exception) { false }
 
-    /* Returns true when we can proceed right now; otherwise logs and (maybe) asks. */
+    /* Fires once on launch: prompts straight away if Shizuku is up and unpermitted. */
+    private fun askShizukuOnLaunch() {
+        try {
+            if (!installed("moe.shizuku.privileged.api")) {
+                log("Shizuku not installed — install it to inject")
+                return
+            }
+            if (!Shizuku.pingBinder()) {
+                log("Shizuku is not running — start Shizuku first")
+                return
+            }
+            if (Shizuku.isPreV11() || Shizuku.checkSelfPermission() == 0) {
+                log("Shizuku ready")
+                return
+            }
+            if (Shizuku.shouldShowRequestPermissionRationale()) {
+                log("Shizuku permission denied permanently — enable it inside Shizuku")
+                return
+            }
+            log("requesting Shizuku permission")
+            Shizuku.requestPermission(REQ)
+        } catch (e: Throwable) {
+            log("Shizuku error: ${e.message}")
+        }
+    }
+
+    /* Returns true when we can proceed right now; otherwise asks and parks the tap. */
     private fun ensureShizuku(): Boolean {
         if (shizukuUsable()) return true
         try {

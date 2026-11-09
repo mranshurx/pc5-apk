@@ -1,0 +1,4 @@
+[
+  { "label": "Free Fire (Global)", "pkg": "com.dts.freefireth", "dest": "files" },
+  { "label": "Free Fire MAX",      "pkg": "com.dts.freefiremax", "dest": "files" }
+]

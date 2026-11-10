@@ -1,7 +1,6 @@
 package com.pc5.android
 
 import rikka.shizuku.Shizuku
-import java.io.File
 import java.lang.reflect.InvocationTargetException
 
 data class ShellResult(val code: Int, val out: String, val mode: String)
@@ -10,7 +9,7 @@ object Injector {
 
     private const val BASE = "/sdcard/Android/data"
 
-    /* "root", "shell" or the app's own uid — decided by what newProcess() managed to do. */
+    /* "shizuku", "app", or "unknown" — how the last process was actually spawned. */
     @Volatile private var mode = "unknown"
 
     private val pkgRe = Regex("^[A-Za-z0-9._]+$")
@@ -22,7 +21,7 @@ object Injector {
     }
 
     /* Reflection, but never silent: if both Shizuku entry points fail we fall back to the
-       app uid and *say so* through the mode field, because that path needs storage rights. */
+       app uid and say so through the mode field, because that path needs storage rights. */
     private fun newProcess(cmd: Array<String>): Process {
         val types = arrayOf<Class<*>>(
             Array<String>::class.java,
@@ -54,19 +53,25 @@ object Injector {
         }
     }
 
-    fun sh(cmd: String): ShellResult = try {
-        val p = newProcess(arrayOf("sh", "-c", "$cmd 2>&1"))
-        val out = p.inputStream.bufferedReader().use { it.readText() }
-        p.waitFor() to out.trim()
-            .let { ShellResult(it.first, it.second, mode) }
-    } catch (e: Throwable) {
-        ShellResult(-1, e.message ?: e.javaClass.simpleName, mode)
+    /* stderr is folded into stdout with 2>&1 so a single pipe read can never stall. */
+    fun sh(cmd: String): ShellResult {
+        return try {
+            val p = newProcess(arrayOf("sh", "-c", "$cmd 2>&1"))
+            val out = p.inputStream.bufferedReader().use { it.readText() }
+            val code = p.waitFor()
+            ShellResult(code, out.trim(), mode)
+        } catch (e: Throwable) {
+            ShellResult(-1, e.message ?: e.javaClass.simpleName, mode)
+        }
     }
 
-    /* Returns "0" for root, "2000" for the adb shell user, the app uid otherwise. */
-    fun uid(): String = sh("id -u").out.ifBlank { "?" }
+    /* "0" for root, "2000" for the adb shell user, the app's own uid otherwise. */
+    fun uid(): String {
+        val u = sh("id -u").out
+        return u.ifBlank { "?" }
+    }
 
-    fun canWriteExternal(): Boolean {
+    fun privileged(): Boolean {
         val u = uid()
         return u == "0" || u == "2000"
     }
@@ -92,12 +97,12 @@ object Injector {
                 if (p.code != 0) return p
             }
 
-            /* -n preserves the original when the name carries the "original-absent" marker. */
+            /* -n preserves the original when the name carried the "original-absent" marker. */
             val cp = if (item.skipIfExists) "cp -n" else "cp -f"
             val r = sh("$cp '${item.file.absolutePath}' '$dest'")
             if (r.code != 0) return r
 
-            /* Cosmetic on emulated storage and non-fatal on ROMs where chmod refuses. */
+            /* Cosmetic on emulated storage, non-fatal where chmod refuses. */
             sh("chmod 666 '$dest'")
         }
         return ShellResult(0, "", mode)
@@ -109,23 +114,28 @@ object Injector {
         val missing = ArrayList<String>()
         for (item in stage.items) {
             val rel = item.file.relativeTo(stage.root).path
-            val r = sh("test -s '$dir/$rel'")
-            if (r.code != 0) missing.add(rel)
+            if (sh("test -s '$dir/$rel'").code != 0) missing.add(rel)
         }
         return missing
     }
 
     fun wipe(stage: Stage, target: Target): ShellResult {
-        val dir = destOf(target)
         if (stage.items.isEmpty()) return ShellResult(0, "", mode)
+        val dir = destOf(target)
 
-        val list = stage.items.joinToString(" ") { "'$dir/${it.file.relativeTo(stage.root).path}'" }
+        val list = stage.items.joinToString(" ") {
+            "'$dir/${it.file.relativeTo(stage.root).path}'"
+        }
         val r = sh("rm -f $list")
 
-        for (item in stage.items) {
-            val parent = "$dir/${item.file.relativeTo(stage.root).path}".substringBeforeLast('/', "")
-            if (parent.isNotEmpty() && parent != dir) sh("rmdir '$parent'")
-        }
+        /* Prune directories the payload created, deepest last. */
+        stage.items
+            .map { "$dir/${it.file.relativeTo(stage.root).path}".substringBeforeLast('/', "") }
+            .filter { it.isNotEmpty() && it != dir }
+            .distinct()
+            .sortedByDescending { it.length }
+            .forEach { sh("rmdir '$it'") }
+
         return r
     }
 }

@@ -1,9 +1,14 @@
 package com.pc5.android
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.os.CountDownTimer
+import android.os.Environment
+import android.provider.Settings
 import android.view.View
 import android.widget.*
 import androidx.appcompat.app.AppCompatActivity
@@ -14,12 +19,12 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import rikka.shizuku.Shizuku
-import java.io.File
 
 class MainActivity : AppCompatActivity() {
 
     companion object {
         private const val REQ = 4711
+        private const val REQ_STORAGE = 4712
         private const val DELETE_AFTER_MS = 3000L
     }
 
@@ -39,9 +44,9 @@ class MainActivity : AppCompatActivity() {
     private var activeKey = ""
     private var did = ""
     private var timer: CountDownTimer? = null
-    private var pending: Pair<List<File>, Target>? = null
+    private var pending: Stage? = null
+    private var pendingTarget: Target? = null
 
-    /* Set when a Start tap is waiting on the permission dialog. */
     private var awaitingStart = false
     private var busy = false
 
@@ -96,7 +101,6 @@ class MainActivity : AppCompatActivity() {
         val saved = getSharedPreferences("pc5", MODE_PRIVATE).getString("key", null)
         if (saved != null) revalidate(saved) else showUnlock()
 
-        /* Ask up front, on first launch, so Start never has to. */
         statusText.postDelayed({ askShizukuOnLaunch() }, 600)
     }
 
@@ -197,7 +201,6 @@ class MainActivity : AppCompatActivity() {
         packageManager.getPackageInfo(p, 0); true
     } catch (e: Exception) { false }
 
-    /* Fires once on launch: prompts straight away if Shizuku is up and unpermitted. */
     private fun askShizukuOnLaunch() {
         try {
             if (!installed("moe.shizuku.privileged.api")) {
@@ -223,7 +226,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /* Returns true when we can proceed right now; otherwise asks and parks the tap. */
     private fun ensureShizuku(): Boolean {
         if (shizukuUsable()) return true
         try {
@@ -250,6 +252,27 @@ class MainActivity : AppCompatActivity() {
         } catch (e: Throwable) {
             log("Shizuku error: ${e.message}")
             return false
+        }
+    }
+
+    /* ---------------- storage rights (only needed by the app-uid fallback) ---------------- */
+
+    private fun storageGranted(): Boolean =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) Environment.isExternalStorageManager()
+        else checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
+
+    private fun askStorage() {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                startActivity(Intent(
+                    Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                    Uri.parse("package:$packageName")
+                ))
+            } else {
+                requestPermissions(arrayOf(Manifest.permission.WRITE_EXTERNAL_STORAGE), REQ_STORAGE)
+            }
+        } catch (e: Throwable) {
+            log("cannot open storage settings: ${e.message}")
         }
     }
 
@@ -281,22 +304,36 @@ class MainActivity : AppCompatActivity() {
         busy = true
         lifecycleScope.launch {
             try {
-                val staged = withContext(Dispatchers.IO) { Payload.stage(this@MainActivity) }
-                if (staged.isEmpty()) {
-                    log("payload empty — staging failed")
-                    return@launch
-                }
-                log("staged ${staged.size} file(s)")
+                val uid = withContext(Dispatchers.IO) { Injector.uid() }
+                val privileged = uid == "0" || uid == "2000"
+                log("shell uid $uid" + if (privileged) "" else " — app uid, storage rights required")
 
-                val push = withContext(Dispatchers.IO) { Injector.push(staged, target) }
-                if (push.first != 0) {
-                    log("inject failed: ${push.second.ifBlank { "exit ${push.first}" }}")
+                if (!privileged && !storageGranted()) {
+                    log("grant “All files access” to this app, then tap Start again")
+                    askStorage()
                     return@launch
                 }
-                log("injected ${staged.size} file(s) → ${target.dest}")
+
+                val stage = withContext(Dispatchers.IO) { Payload.stage(this@MainActivity) }
+                log("staged ${stage.count} file(s)")
+
+                val push = withContext(Dispatchers.IO) { Injector.push(stage, target) }
+                if (push.code != 0) {
+                    log("inject failed: ${push.out.ifBlank { "exit ${push.code}" }}")
+                    return@launch
+                }
+
+                val missing = withContext(Dispatchers.IO) { Injector.verify(stage, target) }
+                if (missing.isNotEmpty()) {
+                    log("inject incomplete — missing ${missing.size}/${stage.count}: ${missing.take(3).joinToString()}")
+                    return@launch
+                }
+
+                log("injected ${stage.count} file(s) → ${target.dest}")
+                pending = stage
+                pendingTarget = target
 
                 launchGame(target)
-                pending = staged to target
 
                 for (i in 3 downTo 1) { log("wiping in ${i}s"); delay(1000) }
                 runCatching { wipeNow() }
@@ -317,13 +354,14 @@ class MainActivity : AppCompatActivity() {
     }
 
     private suspend fun wipeNow() {
-        val p = pending ?: return
+        val stage = pending ?: return
+        val target = pendingTarget ?: return
         pending = null
-        val r = withContext(Dispatchers.IO) { Injector.wipe(p.first, p.second) }
-        log(if (r.first == 0) "files deleted from game" else "wipe failed: ${r.second}")
-        withContext(Dispatchers.IO) {
-            p.first.firstOrNull()?.parentFile?.let { Injector.sh("rm -rf '${it.absolutePath}'") }
-        }
+        pendingTarget = null
+
+        val r = withContext(Dispatchers.IO) { Injector.wipe(stage, target) }
+        log(if (r.code == 0) "files deleted from game" else "wipe failed: ${r.out}")
+        withContext(Dispatchers.IO) { Payload.discard(stage) }
     }
 
     private fun log(s: String) {

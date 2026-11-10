@@ -22,11 +22,16 @@ val keystoreFile: File? = System.getenv("KEYSTORE_PATH")
 
 val encOut = layout.buildDirectory.dir("generated/raw1enc")
 
+/*
+ * Seals raw1/ into a single AES-256-GCM blob at assets/raw1/p.bin.
+ * Recursive. ".network-original-absent" is stripped from the name and recorded
+ * as a skip-if-present flag, so the original file on device survives.
+ */
 val sealRaw1 = tasks.register("sealRaw1") {
     val srcDir = rootProject.file("raw1")
     val outDir = encOut
     val key = raw1Key
-    inputs.dir(srcDir)
+    inputs.dir(srcDir).optional()
     inputs.property("k", key)
     outputs.dir(outDir)
     doLast {
@@ -34,14 +39,32 @@ val sealRaw1 = tasks.register("sealRaw1") {
         dest.deleteRecursively()
         dest.mkdirs()
 
-        val files = srcDir.listFiles()
-            ?.filter { it.isFile && !it.name.equals("README.txt", ignoreCase = true) }
-            ?.sortedBy { it.name }
-            ?: emptyList()
-        if (files.isEmpty()) {
-            println("raw1: EMPTY — nothing will be injected")
-            return@doLast
+        val suffix = ".network-original-absent"
+
+        val found = if (srcDir.isDirectory) {
+            srcDir.walkTopDown()
+                .filter { it.isFile && !it.name.equals("README.txt", ignoreCase = true) }
+                .associateBy { it.relativeTo(srcDir).invariantSeparatorsPath }
+        } else {
+            emptyMap()
         }
+
+        if (found.isEmpty()) {
+            throw GradleException("raw1/ is empty — drop payload files in raw1/ before building")
+        }
+
+        /* Strip the marker, remember it, and refuse silent collisions. */
+        val planned = LinkedHashMap<String, Pair<File, Boolean>>()
+        for ((rel, f) in found.toSortedMap()) {
+            val skip = rel.endsWith(suffix)
+            val clean = (if (skip) rel.removeSuffix(suffix) else rel).trim('/')
+            if (clean.isEmpty()) continue
+            val prev = planned.put(clean, f to skip)
+            if (prev != null) {
+                throw GradleException("raw1/: '$clean' collides after stripping $suffix")
+            }
+        }
+        if (planned.isEmpty()) throw GradleException("raw1/ holds no usable files")
 
         val aesKey = SecretKeySpec(
             MessageDigest.getInstance("SHA-256").digest(key.toByteArray()), "AES"
@@ -55,16 +78,21 @@ val sealRaw1 = tasks.register("sealRaw1") {
         }
 
         val sb = StringBuilder("{")
-        files.forEachIndexed { i, f ->
-            if (i > 0) sb.append(",")
-            val name = f.name.replace("\\", "\\\\").replace("\"", "\\\"")
-            val b64 = Base64.getEncoder().encodeToString(seal(f.readBytes()))
-            sb.append("\"").append(name).append("\":\"").append(b64).append("\"")
+        planned.entries.forEachIndexed { i, (clean, pair) ->
+            if (i > 0) sb.append(',')
+            val esc = clean.replace("\\", "\\\\").replace("\"", "\\\"")
+            val b64 = Base64.getEncoder().encodeToString(seal(pair.first.readBytes()))
+            sb.append('"').append(esc).append("\":{\"d\":\"").append(b64).append('"')
+            if (pair.second) sb.append(",\"o\":true")
+            sb.append('}')
         }
-        sb.append("}")
+        sb.append('}')
 
         dest.resolve("p.bin").writeBytes(seal(sb.toString().toByteArray()))
-        println("raw1: sealed ${files.size} file(s) -> ${files.joinToString { it.name }}")
+
+        val skipCount = planned.count { it.value.second }
+        println("raw1: sealed ${planned.size} file(s), $skipCount skip-if-present")
+        planned.keys.forEach { println("  -> $it") }
     }
 }
 
@@ -138,6 +166,7 @@ android {
     buildFeatures { buildConfig = true }
 
     androidResources {
+        /* p.bin must stay stored, not deflated, so assets.open() yields the raw blob. */
         noCompress += listOf("bin")
     }
 }

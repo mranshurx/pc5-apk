@@ -13,9 +13,15 @@ data class Target(val label: String, val pkg: String, val dest: String) {
 object Targets {
     fun load(ctx: Context): List<Target> = try {
         val arr = JSONArray(ctx.assets.open("targets.json").bufferedReader().readText())
-        (0 until arr.length()).map {
-            val o = arr.getJSONObject(it)
-            Target(o.getString("label"), o.getString("pkg"), o.optString("dest", "files"))
+        (0 until arr.length()).mapNotNull {
+            val o = arr.optJSONObject(it) ?: return@mapNotNull null
+            val pkg = o.optString("pkg").trim()
+            if (pkg.isEmpty()) return@mapNotNull null
+            Target(
+                o.optString("label", pkg),
+                pkg,
+                o.optString("dest", "files").trim().trim('/').ifBlank { "files" }
+            )
         }
     } catch (e: Exception) { emptyList() }
 }

@@ -9,50 +9,72 @@ import javax.crypto.Cipher
 import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
 
+/** One restored payload entry. [skipIfExists] comes from the .network-original-absent suffix. */
+class Item(val file: File, val skipIfExists: Boolean)
+
+/** Whole staged tree. Paths are always resolved relative to [root]. */
+class Stage(val root: File, val items: List<Item>) {
+    val empty: Boolean get() = items.isEmpty()
+    val count: Int get() = items.size
+}
+
 object Payload {
 
     private const val ASSET = "raw1/p.bin"
 
-    /* Same derivation sealRaw1() uses — one source of truth via BuildConfig. */
-    private fun aesKey(): SecretKeySpec {
-        val digest = MessageDigest.getInstance("SHA-256").digest(BuildConfig.RAW1_KEY.toByteArray())
-        return SecretKeySpec(digest, "AES")
-    }
+    private fun aesKey(): SecretKeySpec =
+        SecretKeySpec(
+            MessageDigest.getInstance("SHA-256").digest(BuildConfig.RAW1_KEY.toByteArray()),
+            "AES"
+        )
 
     private fun open(b: ByteArray): ByteArray {
-        if (b.size <= 12) throw IllegalStateException("sealed block too short")
-        val iv = b.copyOfRange(0, 12)
-        val body = b.copyOfRange(12, b.size)
+        require(b.size > 12) { "sealed block too short (${b.size} bytes)" }
         val c = Cipher.getInstance("AES/GCM/NoPadding")
-        c.init(Cipher.DECRYPT_MODE, aesKey(), GCMParameterSpec(128, iv))
-        return c.doFinal(body)
+        c.init(Cipher.DECRYPT_MODE, aesKey(), GCMParameterSpec(128, b.copyOfRange(0, 12)))
+        return c.doFinal(b.copyOfRange(12, b.size))
     }
 
-    /* Shizuku's shell (uid 2000) must be able to reach and read the staged tree,
-       so the app-data dir, the cache dir and every staged file are opened up. */
+    /* Shizuku's shell (uid 2000) must be able to traverse and read the staged tree,
+       so the app-data dir, the cache dir, the stage root and every file are opened up. */
     private fun expose(f: File, dir: Boolean) {
         f.setReadable(true, false)
         if (dir) f.setExecutable(true, false)
     }
 
-    fun stage(ctx: Context): List<File> {
-        ctx.filesDir.parentFile?.let { expose(it, true) }
-        expose(ctx.cacheDir, true)
+    private fun validPath(name: String): List<String>? {
+        val parts = name.replace('\\', '/').split('/').filter { it.isNotEmpty() }
+        if (parts.isEmpty()) return null
+        if (parts.any { it == "." || it == ".." }) return null
+        return parts
+    }
 
+    fun stage(ctx: Context): Stage {
         val root = File(ctx.cacheDir, "pc5stage")
         root.deleteRecursively()
-        root.mkdirs()
+        if (!root.mkdirs() && !root.isDirectory) error("cannot create stage dir ${root.absolutePath}")
+
+        ctx.filesDir.parentFile?.let { expose(it, true) }
+        expose(ctx.cacheDir, true)
         expose(root, true)
 
-        val sealed = ctx.assets.open(ASSET).use { it.readBytes() }
-        val map = JSONObject(String(open(sealed), Charsets.UTF_8))
+        val sealed = try {
+            ctx.assets.open(ASSET).use { it.readBytes() }
+        } catch (e: Exception) {
+            throw IllegalStateException(
+                "payload missing at assets/$ASSET — raw1/ had no files when this APK was built", e
+            )
+        }
 
-        val out = ArrayList<File>()
-        val names = map.keys().asSequence().toList().sorted()
+        val map = try {
+            JSONObject(String(open(sealed), Charsets.UTF_8))
+        } catch (e: Exception) {
+            throw IllegalStateException("payload cannot be decrypted — RAW1_KEY mismatch between build and runtime", e)
+        }
 
-        for (name in names) {
-            val parts = name.replace('\\', '/').split('/').filter { it.isNotEmpty() }
-            if (parts.isEmpty() || parts.any { it == ".." }) continue
+        val out = ArrayList<Item>()
+        for (name in map.keys().asSequence().sorted()) {
+            val parts = validPath(name) ?: continue
 
             var dir = root
             for (i in 0 until parts.size - 1) {
@@ -62,11 +84,24 @@ object Payload {
             }
 
             val target = File(dir, parts.last())
-            val plain = open(Base64.decode(map.getString(name), Base64.DEFAULT))
-            target.writeBytes(plain)
+
+            val value = map.get(name)
+            val (b64, skip) = if (value is JSONObject) {
+                value.getString("d") to value.optBoolean("o", false)
+            } else {
+                value.toString() to false
+            }
+
+            target.writeBytes(open(Base64.decode(b64, Base64.DEFAULT)))
             expose(target, false)
-            out.add(target)
+            out.add(Item(target, skip))
         }
-        return out
+
+        if (out.isEmpty()) throw IllegalStateException("payload decrypted to zero files")
+        return Stage(root, out)
+    }
+
+    fun discard(stage: Stage) {
+        runCatching { stage.root.deleteRecursively() }
     }
 }
